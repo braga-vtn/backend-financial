@@ -40,18 +40,18 @@ model Token {
 }
 
 model Professional {
-  id        String    @id @default(cuid())
-  name      String
-  role      String?
-  phone     String?
-  pixKey    String?
-  active    Boolean   @default(true)
-  leftAt    DateTime? @db.Date
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
-  userId    String
-  User      User      @relation(fields: [userId], references: [clerkId], onDelete: Cascade)
-
+  id                String             @id @default(cuid())
+  name              String
+  role              String?
+  phone             String?
+  pixKey            String?
+  isCashbox         Boolean            @default(false)
+  active            Boolean            @default(true)
+  leftAt            DateTime?          @db.Date
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  userId            String
+  User              User               @relation(fields: [userId], references: [clerkId], onDelete: Cascade)
   expenses          Expense[]
   recurringExpenses RecurringExpense[]
   cycleParticipants CycleParticipant[]
@@ -59,11 +59,9 @@ model Professional {
   settlementsTo     Settlement[]       @relation("SettlementTo")
 
   @@index([active])
+  @@index([userId, isCashbox])
   @@map("professionals")
 }
-
-// ───────────── Financeiro ─────────────
-// Dinheiro sempre em centavos (Int). Datas de negócio em @db.Date.
 
 enum CostType {
   FIXED
@@ -76,15 +74,14 @@ enum CycleStatus {
 }
 
 model Category {
-  id        String   @id @default(cuid())
-  name      String
-  type      CostType
-  active    Boolean  @default(true)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  userId    String
-  User      User     @relation(fields: [userId], references: [clerkId], onDelete: Cascade)
-
+  id                String             @id @default(cuid())
+  name              String
+  type              CostType
+  active            Boolean            @default(true)
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  userId            String
+  User              User               @relation(fields: [userId], references: [clerkId], onDelete: Cascade)
   expenses          Expense[]
   recurringExpenses RecurringExpense[]
 
@@ -92,18 +89,16 @@ model Category {
   @@map("categories")
 }
 
-// Período de 15 a 14. Criado sob demanda (get-or-create).
 model Cycle {
-  id        String      @id @default(cuid())
-  startDate DateTime    @db.Date
-  endDate   DateTime    @db.Date
-  status    CycleStatus @default(OPEN)
-  closedAt  DateTime?
-  createdAt DateTime    @default(now())
-  updatedAt DateTime    @updatedAt
-  userId    String
-  User      User        @relation(fields: [userId], references: [clerkId], onDelete: Cascade)
-
+  id           String             @id @default(cuid())
+  startDate    DateTime           @db.Date
+  endDate      DateTime           @db.Date
+  status       CycleStatus        @default(OPEN)
+  closedAt     DateTime?
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+  userId       String
+  User         User               @relation(fields: [userId], references: [clerkId], onDelete: Cascade)
   expenses     Expense[]
   participants CycleParticipant[]
   settlements  Settlement[]
@@ -114,29 +109,23 @@ model Cycle {
 }
 
 model Expense {
-  id          String   @id @default(cuid())
+  id          String            @id @default(cuid())
   description String
   amountCents Int
-  date        DateTime @db.Date
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  userId      String
-  User        User     @relation(fields: [userId], references: [clerkId], onDelete: Cascade)
-
-  cycleId String
-  cycle   Cycle  @relation(fields: [cycleId], references: [id], onDelete: Restrict)
-
-  paidById String
-  paidBy   Professional @relation(fields: [paidById], references: [id], onDelete: Restrict)
-
-  categoryId String
-  category   Category @relation(fields: [categoryId], references: [id], onDelete: Restrict)
-
-  // preenchido quando o lançamento nasce de um custo fixo
+  date        DateTime          @db.Date
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+  cycleId     String
+  paidById    String
+  categoryId  String
   recurringId String?
+  userId      String
+  cycle       Cycle             @relation(fields: [cycleId], references: [id], onDelete: Restrict)
+  paidBy      Professional      @relation(fields: [paidById], references: [id], onDelete: Restrict)
+  category    Category          @relation(fields: [categoryId], references: [id], onDelete: Restrict)
   recurring   RecurringExpense? @relation(fields: [recurringId], references: [id], onDelete: SetNull)
+  User        User              @relation(fields: [userId], references: [clerkId], onDelete: Cascade)
 
-  // impede gerar o mesmo custo fixo duas vezes no mesmo ciclo
   @@unique([recurringId, cycleId])
   @@index([userId, cycleId])
   @@index([paidById])
@@ -145,57 +134,50 @@ model Expense {
 }
 
 model RecurringExpense {
-  id          String   @id @default(cuid())
-  description String
-  amountCents Int
-  dayOfMonth  Int
-  active      Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  userId      String
-  User        User     @relation(fields: [userId], references: [clerkId], onDelete: Cascade)
-
-  categoryId String
-  category   Category @relation(fields: [categoryId], references: [id], onDelete: Restrict)
-
+  id              String        @id @default(cuid())
+  description     String
+  amountCents     Int
+  dayOfMonth      Int
+  active          Boolean       @default(true)
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  userId          String
   defaultPaidById String?
+  categoryId      String
+  category        Category      @relation(fields: [categoryId], references: [id], onDelete: Restrict)
   defaultPaidBy   Professional? @relation(fields: [defaultPaidById], references: [id], onDelete: SetNull)
-
-  expenses Expense[]
+  User            User          @relation(fields: [userId], references: [clerkId], onDelete: Cascade)
+  expenses        Expense[]
 
   @@index([userId, active])
   @@map("recurring_expenses")
 }
 
-// Foto congelada do fechamento: quanto cada um pagou, a parte e o saldo.
 model CycleParticipant {
-  id             String @id @default(cuid())
+  id             String       @id @default(cuid())
   paidCents      Int
   shareCents     Int
-  balanceCents   Int // paidCents - shareCents (positivo = recebe)
+  balanceCents   Int
   cycleId        String
-  cycle          Cycle  @relation(fields: [cycleId], references: [id], onDelete: Cascade)
   professionalId String
+  cycle          Cycle        @relation(fields: [cycleId], references: [id], onDelete: Cascade)
   professional   Professional @relation(fields: [professionalId], references: [id], onDelete: Restrict)
 
   @@unique([cycleId, professionalId])
   @@map("cycle_participants")
 }
 
-// Transferências sugeridas no fechamento ("Kelly paga 750 à Luara").
 model Settlement {
-  id          String    @id @default(cuid())
+  id          String       @id @default(cuid())
   amountCents Int
   paidAt      DateTime?
-  createdAt   DateTime  @default(now())
+  createdAt   DateTime     @default(now())
   cycleId     String
-  cycle       Cycle     @relation(fields: [cycleId], references: [id], onDelete: Cascade)
-
-  fromId String
-  from   Professional @relation("SettlementFrom", fields: [fromId], references: [id], onDelete: Restrict)
-
-  toId String
-  to   Professional @relation("SettlementTo", fields: [toId], references: [id], onDelete: Restrict)
+  fromId      String
+  toId        String
+  cycle       Cycle        @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  from        Professional @relation("SettlementFrom", fields: [fromId], references: [id], onDelete: Restrict)
+  to          Professional @relation("SettlementTo", fields: [toId], references: [id], onDelete: Restrict)
 
   @@index([cycleId])
   @@map("settlements")

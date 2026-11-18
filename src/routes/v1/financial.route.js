@@ -49,6 +49,8 @@ router.put(
 );
 
 // ───────── custos fixos ─────────
+router.get('/cashbox', auth('system'), financialController.getCashbox);
+
 router.get('/recurring', auth('system'), financialController.getRecurring);
 router.post(
   '/recurring',

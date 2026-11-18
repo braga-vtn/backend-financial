@@ -15,10 +15,12 @@ const {
 
 const prisma = new PrismaClient();
 
+const CASHBOX_NAME = 'Caixa';
+
 // ───────────── includes/selects reutilizados ─────────────
 
 const expenseInclude = {
-  paidBy: { select: { id: true, name: true } },
+  paidBy: { select: { id: true, name: true, isCashbox: true } },
   category: { select: { id: true, name: true, type: true } },
 };
 const expenseTotalsSelect = {
@@ -28,10 +30,13 @@ const expenseTotalsSelect = {
   category: { select: { type: true } },
 };
 const closedCycleInclude = {
-  participants: { include: { professional: { select: { name: true } } } },
+  participants: { include: { professional: { select: { name: true, isCashbox: true } } } },
   settlements: {
     orderBy: { amountCents: 'desc' },
-    include: { from: { select: { name: true } }, to: { select: { name: true } } },
+    include: {
+      from: { select: { name: true, isCashbox: true } },
+      to: { select: { name: true, isCashbox: true } },
+    },
   },
 };
 const recurringInclude = {
@@ -39,6 +44,7 @@ const recurringInclude = {
   defaultPaidBy: { select: { id: true, name: true } },
 };
 const categorySelect = { id: true, name: true, type: true, active: true };
+const cashboxSelect = { id: true, name: true, isCashbox: true };
 
 // ───────────── helpers internos (lançam ApiError; sempre chamados dentro de um try/catch) ─────────────
 
@@ -49,6 +55,10 @@ const pickCycle = (cycle) => ({
   status: cycle.status,
   closedAt: cycle.closedAt,
 });
+
+const NO_PAYER_VALUES = ['', 'none'];
+
+const normalizePayerId = (value) => (NO_PAYER_VALUES.includes(value) ? null : value);
 
 // get-or-create: o @@unique([userId, startDate]) evita ciclo duplicado em requisições simultâneas
 const getOrCreateCycle = (userId, { startDate, endDate }) =>
@@ -69,15 +79,45 @@ const assertCycleOpen = (cycle) => {
   }
 };
 
+// get-or-create. O índice único parcial garante um caixa por usuário mesmo com requisições simultâneas.
+// Chame FORA de $transaction (um erro de unique dentro de tx aborta a transação inteira no Postgres).
+const getOrCreateCashbox = async (userId) => {
+  const find = () => prisma.professional.findFirst({ where: { userId, isCashbox: true }, select: cashboxSelect });
+
+  const existing = await find();
+  if (existing) return existing;
+
+  try {
+    return await prisma.professional.create({
+      data: { userId, name: CASHBOX_NAME, isCashbox: true },
+      select: cashboxSelect,
+    });
+  } catch (error) {
+    if (error.code === 'P2002') return find(); // outra requisição criou primeiro
+    throw error;
+  }
+};
+
 const assertProfessional = async (userId, professionalId) => {
   const professional = await prisma.professional.findFirst({
     where: { id: professionalId, userId },
-    select: { active: true },
+    select: { active: true, isCashbox: true },
   });
+
   if (!professional) throw new ApiError(httpStatus.NOT_FOUND, 'Profissional não encontrado.');
   if (!professional.active) {
     throw new ApiError(httpStatus.NOT_ACCEPTABLE, 'Esse profissional está inativo e não pode receber novos lançamentos.');
   }
+  return professional;
+};
+
+// pagador padrão do custo fixo: vazio ou o próprio caixa viram null ("Caixa")
+const resolveDefaultPayer = async (userId, value) => {
+  const id = normalizePayerId(value) || null;
+  if (!id) return null;
+
+  const professional = await assertProfessional(userId, id);
+  return professional.isCashbox ? null : id;
 };
 
 const assertCategory = async (userId, categoryId) => {
@@ -97,12 +137,17 @@ const assertCategoryNameAvailable = async (userId, name, ignoreId) => {
 };
 
 // Cria os lançamentos dos custos fixos ativos que ainda não existem no ciclo.
-// Só gera quando há pagador padrão ativo, pois Expense.paidById é obrigatório.
+// Sem pagador padrão ativo, o lançamento sai no caixa.
 const generateRecurringExpenses = async (userId, cycle) => {
   const recurring = await prisma.recurringExpense.findMany({
-    where: { userId, active: true, defaultPaidById: { not: null }, defaultPaidBy: { active: true } },
+    where: { userId, active: true },
+    include: { defaultPaidBy: { select: { active: true } } },
   });
+
   if (recurring.length === 0) return;
+
+  const hasPayer = (item) => Boolean(item.defaultPaidById && item.defaultPaidBy?.active);
+  const cashboxId = recurring.every(hasPayer) ? null : (await getOrCreateCashbox(userId)).id;
 
   await prisma.expense.createMany({
     data: recurring.map((item) => ({
@@ -111,7 +156,7 @@ const generateRecurringExpenses = async (userId, cycle) => {
       date: getRecurringDate(item.dayOfMonth, cycle),
       userId,
       cycleId: cycle.id,
-      paidById: item.defaultPaidById,
+      paidById: hasPayer(item) ? item.defaultPaidById : cashboxId,
       categoryId: item.categoryId,
       recurringId: item.id,
     })),
@@ -125,12 +170,16 @@ const syncCurrentCycle = async (userId) => {
   return cycle;
 };
 
-// participantes do rateio em um ciclo aberto: profissionais ativos + quem pagou algo no ciclo
+// participantes do rateio em um ciclo aberto: profissionais ativos + quem pagou algo no ciclo.
+// O caixa só entra se pagou algo no ciclo, e nunca como "ativo".
 const computeLiveBalances = async (client, userId, expenses) => {
   const payerIds = [...new Set(expenses.map((expense) => expense.paidById))];
   const professionals = await client.professional.findMany({
-    where: { userId, OR: [{ active: true }, { id: { in: payerIds } }] },
-    select: { id: true, name: true },
+    where: {
+      userId,
+      OR: [{ active: true, isCashbox: false }, { id: { in: payerIds } }],
+    },
+    select: { id: true, name: true, isCashbox: true },
   });
   return calculateBalances(professionals, expenses);
 };
@@ -150,23 +199,24 @@ const buildClosedSummary = (cycle, expenses) => ({
     .map((participant) => ({
       professionalId: participant.professionalId,
       name: participant.professional.name,
+      isCashbox: participant.professional.isCashbox,
       paidCents: participant.paidCents,
       shareCents: participant.shareCents,
       balanceCents: participant.balanceCents,
     }))
-    .sort((a, b) => a.name.localeCompare(b.name, 'pt-BR')),
+    .sort((a, b) => Number(a.isCashbox) - Number(b.isCashbox) || a.name.localeCompare(b.name, 'pt-BR')),
   transfers: cycle.settlements.map((settlement) => ({
     id: settlement.id,
     fromId: settlement.fromId,
     fromName: settlement.from.name,
+    fromIsCashbox: settlement.from.isCashbox,
     toId: settlement.toId,
     toName: settlement.to.name,
+    toIsCashbox: settlement.to.isCashbox,
     amountCents: settlement.amountCents,
     paidAt: settlement.paidAt,
   })),
 });
-
-const normalizePayerId = (value) => (value === '' ? null : value);
 
 // ───────────── ciclos ─────────────
 
@@ -284,6 +334,18 @@ const closeCycle = async (userId, cycleId) => {
     if (error instanceof ApiError) throw error;
     logger.error(error);
     throw new ApiError(httpStatus.INTERNAL_SERVER_ERROR, 'Não foi possível fechar o ciclo.');
+  }
+};
+
+// ───────────── caixa ─────────────
+
+const getCashbox = async (userId) => {
+  try {
+    return await getOrCreateCashbox(userId);
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    logger.error(error);
+    throw new ApiError(httpStatus.INTERNAL_SERVER_ERROR, 'Não foi possível carregar o caixa.');
   }
 };
 
@@ -454,10 +516,8 @@ const getRecurring = async (userId) => {
 
 const createRecurring = async (userId, body) => {
   try {
-    const defaultPaidById = normalizePayerId(body.defaultPaidById) || null;
-
     await assertCategory(userId, body.categoryId);
-    if (defaultPaidById) await assertProfessional(userId, defaultPaidById);
+    const defaultPaidById = await resolveDefaultPayer(userId, body.defaultPaidById);
 
     const recurring = await prisma.recurringExpense.create({
       data: {
@@ -485,10 +545,14 @@ const updateRecurring = async (userId, recurringId, body) => {
     const existing = await prisma.recurringExpense.findFirst({ where: { id: recurringId, userId } });
     if (!existing) throw new ApiError(httpStatus.NOT_FOUND, 'Custo fixo não encontrado.');
 
-    const defaultPaidById = body.defaultPaidById === undefined ? undefined : normalizePayerId(body.defaultPaidById) || null;
+    let defaultPaidById; // undefined = não alterar
+    if (body.defaultPaidById !== undefined) {
+      const requested = normalizePayerId(body.defaultPaidById) || null;
+      defaultPaidById =
+        requested && requested === existing.defaultPaidById ? requested : await resolveDefaultPayer(userId, requested);
+    }
 
     if (body.categoryId && body.categoryId !== existing.categoryId) await assertCategory(userId, body.categoryId);
-    if (defaultPaidById && defaultPaidById !== existing.defaultPaidById) await assertProfessional(userId, defaultPaidById);
 
     const recurring = await prisma.recurringExpense.update({
       where: { id: recurringId },
@@ -540,6 +604,7 @@ module.exports = {
   getCycleSummary,
   getClosedCycles,
   closeCycle,
+  getCashbox,
   getExpenses,
   createExpense,
   updateExpense,

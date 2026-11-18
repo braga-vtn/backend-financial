@@ -95,6 +95,11 @@ const markSettlementPaid = catchAsync(async (req, res) => {
   res.status(httpStatus.OK).send(data);
 });
 
+const getCashbox = catchAsync(async (req, res) => {
+  const data = await financialService.getCashbox(getUserId(req));
+  res.status(httpStatus.OK).send(data);
+});
+
 module.exports = {
   getCurrentCycle,
   getClosedCycles,
@@ -111,4 +116,5 @@ module.exports = {
   createRecurring,
   updateRecurring,
   markSettlementPaid,
+  getCashbox,
 };

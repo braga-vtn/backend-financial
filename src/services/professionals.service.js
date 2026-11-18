@@ -18,7 +18,10 @@ const findOwnedProfessional = async (id, userId) => {
 
 const getProfessionals = async ({ status = 'all', q = '' }, userId) => {
   try {
-    const where = { userId };
+    const where = {
+      isCashbox: false,
+      userId,
+    };
 
     if (status === 'active') where.active = true;
     if (status === 'inactive') where.active = false;

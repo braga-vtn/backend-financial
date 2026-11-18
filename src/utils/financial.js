@@ -53,9 +53,12 @@ const sumExpenses = (expenses) =>
  * assim a soma das partes é exatamente o total e a soma dos saldos é sempre zero.
  */
 const calculateBalances = (professionals, expenses) => {
-  if (professionals.length === 0) return [];
+  const members = professionals.filter((professional) => !professional.isCashbox);
+  const cashbox = professionals.find((professional) => professional.isCashbox);
 
-  const sorted = [...professionals].sort((a, b) => a.name.localeCompare(b.name, 'pt-BR') || a.id.localeCompare(b.id));
+  if (members.length === 0) return [];
+
+  const sorted = [...members].sort((a, b) => a.name.localeCompare(b.name, 'pt-BR') || a.id.localeCompare(b.id));
 
   const paidByProfessional = new Map();
   let totalCents = 0;
@@ -67,25 +70,64 @@ const calculateBalances = (professionals, expenses) => {
   const baseShare = Math.floor(totalCents / sorted.length);
   const remainder = totalCents - baseShare * sorted.length;
 
-  return sorted.map((professional, index) => {
+  const balances = sorted.map((professional, index) => {
     const paidCents = paidByProfessional.get(professional.id) || 0;
     const shareCents = baseShare + (index < remainder ? 1 : 0);
 
     return {
       professionalId: professional.id,
       name: professional.name,
+      isCashbox: false,
       paidCents,
       shareCents,
       balanceCents: paidCents - shareCents,
     };
   });
+
+  if (cashbox) {
+    const paidCents = paidByProfessional.get(cashbox.id) || 0;
+    balances.push({
+      professionalId: cashbox.id,
+      name: cashbox.name,
+      isCashbox: true,
+      paidCents,
+      shareCents: 0,
+      balanceCents: paidCents,
+    });
+  }
+
+  return balances;
+};
+
+const buildTransfer = (from, to, amountCents) => ({
+  fromId: from.id,
+  fromName: from.name,
+  fromIsCashbox: Boolean(from.isCashbox),
+  toId: to.id,
+  toName: to.name,
+  toIsCashbox: Boolean(to.isCashbox),
+  amountCents,
+});
+
+const suggestHubTransfers = (balances, cashbox) => {
+  const hub = { id: cashbox.professionalId, name: cashbox.name, isCashbox: true };
+  const toParty = (b) => ({ id: b.professionalId, name: b.name, isCashbox: false });
+
+  const members = balances.filter((b) => !b.isCashbox);
+  const debtors = members.filter((b) => b.balanceCents < 0).sort((a, b) => a.balanceCents - b.balanceCents);
+  const creditors = members.filter((b) => b.balanceCents > 0).sort((a, b) => b.balanceCents - a.balanceCents);
+
+  return [
+    ...debtors.map((b) => buildTransfer(toParty(b), hub, -b.balanceCents)),
+    ...creditors.map((b) => buildTransfer(hub, toParty(b), b.balanceCents)),
+  ];
 };
 
 /**
- * Transferências para zerar os saldos: primeiro pares de valor idêntico,
- * depois o maior devedor paga o maior credor. Gera no máximo (participantes - 1) transferências.
+ * Transferências diretas (sem caixa): primeiro pares de valor idêntico,
+ * depois o maior devedor paga o maior credor. No máximo (participantes - 1) transferências.
  */
-const suggestTransfers = (balances) => {
+const suggestDirectTransfers = (balances) => {
   const debtors = balances
     .filter((b) => b.balanceCents < 0)
     .map((b) => ({ id: b.professionalId, name: b.name, amount: -b.balanceCents }))
@@ -97,8 +139,7 @@ const suggestTransfers = (balances) => {
     .sort((a, b) => b.amount - a.amount);
 
   const transfers = [];
-  const addTransfer = (from, to, amountCents) =>
-    transfers.push({ fromId: from.id, fromName: from.name, toId: to.id, toName: to.name, amountCents });
+  const addTransfer = (from, to, amountCents) => transfers.push(buildTransfer(from, to, amountCents));
 
   for (let index = 0; index < debtors.length; index += 1) {
     const debtor = debtors[index];
@@ -131,6 +172,12 @@ const suggestTransfers = (balances) => {
   }
 
   return transfers;
+};
+
+// com lançamento do caixa no ciclo -> hub; sem -> transferência direta (comportamento anterior)
+const suggestTransfers = (balances) => {
+  const cashbox = balances.find((b) => b.isCashbox);
+  return cashbox ? suggestHubTransfers(balances, cashbox) : suggestDirectTransfers(balances);
 };
 
 module.exports = {
